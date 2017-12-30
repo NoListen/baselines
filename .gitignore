@@ -33,3 +33,4 @@ src
 
 MUJOCO_LOG.TXT
 
+**/checkpoints/

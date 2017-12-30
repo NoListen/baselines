@@ -9,6 +9,9 @@ from collections import deque
 from baselines.common.mpi_adam import MpiAdam
 from baselines.common.cg import cg
 from contextlib import contextmanager
+from trpo_utils import saveToFlat
+from copy import deepcopy
+import gym
 
 def traj_segment_generator(pi, env, horizon, stochastic):
     # Initialize state variables
@@ -65,6 +68,33 @@ def traj_segment_generator(pi, env, horizon, stochastic):
             cur_ep_len = 0
             ob = env.reset()
         t += 1
+
+def traj_segment_generator_test(pi, stochastic):
+    # make the individual environment
+    # HARD CODE AT FIRST
+    env = gym.make("Humanoid-v1")
+    ob = env.reset()
+
+    cur_ep_ret = 0 # return in current episode
+    cur_ep_len = 0 # len of current episode
+
+    while True:
+        # env.render()
+        ac, vpred = pi.act(stochastic, ob)
+        # Slight weirdness here because we need value function at time T
+        # before returning segment [0, T-1] so we get the correct
+        # terminal value
+        ob, rew, new, _ = env.step(ac)
+
+        cur_ep_ret += rew
+        cur_ep_len += 1
+        if new:
+            qpos = env.unwrapped.model.data.qpos[:2]
+            yield "\ttest episode return %f\tlength %i\tx-axis %.3f\ty-axis %.3f" % (cur_ep_ret,
+                            cur_ep_len, qpos[0], qpos[1])
+            cur_ep_ret = 0
+            cur_ep_len = 0
+            ob = env.reset()
 
 def add_vtarg_and_adv(seg, gamma, lam):
     new = np.append(seg["new"], 0) # last element is only used for last vtarg, but we already zeroed it if last new = 1
@@ -174,6 +204,7 @@ def learn(env, policy_func, *,
 
     # Prepare for rollouts
     # ----------------------------------------
+    seg_gen_test = traj_segment_generator_test(pi, stochastic=False)
     seg_gen = traj_segment_generator(pi, env, timesteps_per_batch, stochastic=True)
 
     episodes_so_far = 0
@@ -182,6 +213,7 @@ def learn(env, policy_func, *,
     tstart = time.time()
     lenbuffer = deque(maxlen=40) # rolling buffer for episode lengths
     rewbuffer = deque(maxlen=40) # rolling buffer for episode rewards
+    max_rew = 0
 
     assert sum([max_iters>0, max_timesteps>0, max_episodes>0])==1
 
@@ -272,6 +304,14 @@ def learn(env, policy_func, *,
         lens, rews = map(flatten_lists, zip(*listoflrpairs))
         lenbuffer.extend(lens)
         rewbuffer.extend(rews)
+
+        if np.mean(rewbuffer) > max_rew:
+            max_rew =  np.mean(rewbuffer)
+            log_info = seg_gen_test.__next__()
+            f = open('log.txt', 'a+')
+            f.write("ep%i\trew%f"%(iters_so_far, max_rew)+log_info+"\n")
+            saveToFlat(pi.get_variables(), "checkpoints/model-ep%i-rew%f.p" % (iters_so_far, max_rew))
+            f.close()
 
         logger.record_tabular("EpLenMean", np.mean(lenbuffer))
         logger.record_tabular("EpRewMean", np.mean(rewbuffer))

@@ -7,6 +7,9 @@ from baselines.common.mpi_adam import MpiAdam
 from baselines.common.mpi_moments import mpi_moments
 from mpi4py import MPI
 from collections import deque
+import gym
+
+import ppo_utils
 
 def traj_segment_generator(pi, env, horizon, stochastic):
     t = 0
@@ -60,6 +63,32 @@ def traj_segment_generator(pi, env, horizon, stochastic):
             cur_ep_len = 0
             ob = env.reset()
         t += 1
+
+def traj_segment_generator_test(pi, stochastic):
+    # make the individual environment
+    # HARD CODE AT FIRST
+    env = gym.make("Humanoid-v1")
+    ob = env.reset()
+
+    cur_ep_ret = 0 # return in current episode
+    cur_ep_len = 0 # len of current episode
+
+    while True:
+        # env.render()
+        ac, vpred = pi.act(stochastic, ob)
+        # Slight weirdness here because we need value function at time T
+        # before returning segment [0, T-1] so we get the correct
+        # terminal value
+        ob, rew, new, _ = env.step(ac)
+
+        cur_ep_ret += rew
+        cur_ep_len += 1
+        if new:
+            qpos = env.unwrapped.model.data.qpos[:2]
+            yield (cur_ep_ret, cur_ep_len, qpos)
+            cur_ep_ret = 0
+            cur_ep_len = 0
+            ob = env.reset()
 
 def add_vtarg_and_adv(seg, gamma, lam):
     """
@@ -131,6 +160,8 @@ def learn(env, policy_func, *,
     # Prepare for rollouts
     # ----------------------------------------
     seg_gen = traj_segment_generator(pi, env, timesteps_per_actorbatch, stochastic=True)
+    # test_seg_gen = traj_segment_generator_test(pi, stochastic=False)
+
 
     episodes_so_far = 0
     timesteps_so_far = 0
@@ -189,7 +220,14 @@ def learn(env, policy_func, *,
         losses = []
         for batch in d.iterate_once(optim_batchsize):
             newlosses = compute_losses(batch["ob"], batch["ac"], batch["atarg"], batch["vtarg"], cur_lrmult)
-            losses.append(newlosses)            
+            losses.append(newlosses)
+
+        if (iters_so_far-1) % 100 == 0:
+            ppo_utils.saveToFlat(pi.get_variables(), "checkpoints/model-%i.p" % (iters_so_far//100))
+
+        # test_ep_ret, test_ep_len, qpos = test_seg_gen.__next__()
+        # print("Test Episode: return %f, episode-length %i, x-axis %f y-axis %f" \
+        #     % (test_ep_ret, test_ep_len, qpos[0], qpos[1]))
         meanlosses,_,_ = mpi_moments(losses, axis=0)
         logger.log(fmt_row(13, meanlosses))
         for (lossval, name) in zipsame(meanlosses, loss_names):
